@@ -99,3 +99,18 @@ examples/rat/colors.dot
 examples/rat/colors.pdf
 
 *result.txt
+
+philosophers.erl
+
+*.merge
+
+*.core_old
+
+pc/*.erl
+
+
+mergesort.erl
+
+mapreduce.erl
+
+tcp.erl

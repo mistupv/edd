@@ -66,12 +66,19 @@ space() ->
 print_summary_pid({Pid, Call, Sent, Spawned, Result}) ->
 	Str =
 		space() ++ "PROCESS " ++ any2str(Pid)
-		++ "\nFirst call " ++ build_call_string(element(2, Call))
+		++ "\nFirst call " ++ build_call_string_or_afun(Call)
 		++ "\nResult " ++ any2str(Result)
 		++ "\n" ++ question_list("sent messages", Sent)
 		++ "\n" ++ question_list("spawned processes", Spawned)
 		++ space(),
 	io:format("~s", [Str]).
+
+complexity_pid({_, _, Sent, Spawned, Result}) ->
+	% The call is not counted (Should we add it?)
+		1 
+	+ 	edd_con:complexity_term(Result)
+	+ 	(edd_con:complexity_term(Sent) - 1)
+	+ 	(edd_con:complexity_term(Spawned) - 1).
 
 any2str(stuck_receive) ->
     "Blocked because it is waiting for a message";
@@ -91,7 +98,7 @@ question_list(Text, []) ->
     "No " ++ Text;
 question_list(Text, List) ->
     PPList = 
-        lists:foldl(fun(E, Acc) -> Acc ++ [$\t|edd_con:pp_item(E)] ++ "\n" end, "", List), 
+        lists:foldl(fun(E, Acc) -> Acc ++ [$\t | edd_con:pp_item(E)] ++ "\n" end, "", List), 
     capfirst(Text) ++ ":\n" ++ lists:droplast(PPList).
 
 capfirst([Head | Tail]) when Head >= $a, Head =< $z ->
@@ -112,7 +119,8 @@ build_call_string({ModFun,IdFun,ArgsFun}) ->
                 [ModFun,IdFun,build_args_list_string(ArgsFun)])
     end;
 % TODO: This clause is temporal. Should be removed
-build_call_string(_) ->
+build_call_string(Format) ->
+	% io:format("Format: ~p\n", [Format]),
     "".
 
 build_args_list_string([]) ->
@@ -122,12 +130,29 @@ build_args_list_string([E]) ->
 build_args_list_string([E | Rest]) ->
     format("~p, ~s", [E, build_args_list_string(Rest)]).
 
+build_call_string_or_afun(Call) -> 
+	FunCall = element(2, Call),
+	case FunCall of 
+		{M,F,As} ->
+			build_call_string(FunCall);
+		{M,F,As,_} ->
+			build_call_string({M,F,As});
+		{AnoFun} -> 
+			case get(dict_funs) of 
+				undefined -> 
+					"";
+				DictFuns -> 
+					PosInfo = {pos_info,{Mod,_,_,_}} = hd(dict:fetch(AnoFun, DictFuns)),
+					build_call_string({Mod, PosInfo, []})
+			end
+	end.
+
 ask_initial_process(Pids) ->
 	PidsString = 
 		[
 			{Pid, format(
-				"~p\n\tFirst call:~s\n\tResult: ~s", 
-				[Pid, build_call_string(element(2, Call)), any2str(Result)]
+				"~p\n\tFirst call: ~s\n\tResult: ~s", 
+				[Pid, build_call_string_or_afun(Call), any2str(Result)]
 			) }
 		|| {Pid, Call, _, _, Result} <- Pids],
 	{StrPidsDict,LastId} = 
@@ -151,11 +176,11 @@ ask_initial_process(Pids) ->
 				++ "Pid selection" 
 				++ space() 
 				++ Options 
-				++ "\nPlease, insert a PID where you have observed a wrong behavior: [1..~p]: ",
-			[LastId + 1]),
+				++ "\nPlease, insert a PID where you have observed a wrong behavior (or ~p to select an event): [1..~p]: ",
+			[LastId, LastId + 1]),
 	Answer = 
 		% get_answer(pids_wo_quotes(Question),lists:seq(0,LastId)),
-		get_answer(Question,lists:seq(1,LastId)),
+		get_answer(Question,lists:seq(1,LastId + 1)),
 	Result = 
 		[Data || {Option,Data} <- NDict, Answer =:= Option],
 	{FirstPid, SelectEvent} = 
@@ -217,6 +242,7 @@ buggy_node_str(G, NotCorrectVertex, Message) ->
 		end.
 
 print_buggy_node(G, NotCorrectVertex, Message) ->
+	io:format("\nBuggy node: ~p\n", [NotCorrectVertex]),
 	io:format("~s", [buggy_node_str(G, NotCorrectVertex, Message)]).
 
 get_answer(Message,Answers) ->
@@ -278,15 +304,21 @@ print_root_info(SummaryPidsInfo) ->
 		fun print_summary_pid/1, 
 		SummaryPidsInfo).
 
+get_initial_complexity(SummaryPidsInfo) ->
+	lists:sum(
+		lists:map(
+			fun complexity_pid/1, 
+			SummaryPidsInfo)).
+
 print_help() ->
 	Msg = 
 		string:join(
 			[
 				  space()
 				, "#. - Indicates that the corresponding option is wrong"
-				, "t. - Means \"trust\". Select this when the process or function is reliable."
+				, "t. - Means \"trust\". Select this when the process or function is reliable"
 				, "d. - Means \"don't know\". Select this when you are not sure what is the answer"
-				, "c. - Chooses the question where a given event from the sequence diagram occurs"
+				, "c. - Chooses the question related with a selected event from the sequence diagram"
 				, "s. - Changes the search strategy"
 				, "p. - Changes the search priority"
 				, "u. - Undoes last answer"
@@ -376,8 +408,12 @@ ask(Info, Strategy, Priority) ->
 	FirstState = #edd_con_state{summary_pids = SummaryPids} = 
 		initial_state(Info, Strategy, Priority),
 	print_root_info(SummaryPids),
+	put(initial_complexity, get_initial_complexity(SummaryPids)),
+	put(question_answered, 0),
+	put(question_complexity, 0),
 	{Pids, ChooseEvent} = ask_initial_process(SummaryPids),
-	State0 = FirstState#edd_con_state{pids = Pids, fun_ask_question = fun ask_question/4},
+	State0 = 
+		FirstState#edd_con_state{pids = Pids, fun_ask_question = fun ask_question/4},
 	State1 =
 		case ChooseEvent of 
 			true ->
@@ -403,13 +439,15 @@ ask_about(State) ->
 	   	asking_loop(State),
 	case NotCorrect of
 	     [-1] ->
-	     	io:format("Debugging process finished\n");
+	     	io:format("Debugging process finished\n"),
+	     	session_report();
 	     _ -> 
 	        NotCorrectVertexs = [NCV || NCV <- NotCorrect, 
 	                                   (digraph:out_neighbours(G, NCV)--Correct)==[] ],
 	        case NotCorrectVertexs of
 	             [] ->
 	             	io:format("Not enough information.\n"),
+	             	session_report(),
 	             	NotCorrectWithUnwnownVertexs = 
 			  			[NCV || NCV <- NotCorrect, 
 	                          (digraph:out_neighbours(G, NCV)--(Correct++Unknown))=:=[]],
@@ -435,7 +473,8 @@ ask_about(State) ->
 					end;
 	             [NotCorrectVertex|_] ->
 	               	print_buggy_node(G, NotCorrectVertex,
-	               		"\nThe error has been detected:\n")
+	               		"\nThe error has been detected:\n"),
+	               	session_report()
 	        end
 	end,
 	ok.
@@ -710,7 +749,7 @@ asking_loop(State0 = #edd_con_state{
 		end,
 	asking_loop(NState).
 
-ask_question(_, #question{text = QuestionStr, answers = Answers}, OptsDiagramSeq, FunAsk) ->
+ask_question(Selected, #question{text = QuestionStr, answers = Answers}, OptsDiagramSeq, FunAsk) ->
 	{DictAnswers, LastOpt} = 
 		lists:mapfoldl(
 			fun(E, Id) ->
@@ -719,11 +758,15 @@ ask_question(_, #question{text = QuestionStr, answers = Answers}, OptsDiagramSeq
 			1,
 			Answers
 		),
-	AnswersList = 
-		lists:map(
-			fun({Id, #answer{text = AnswerStr}}) ->
-				format("~p. - ~s", [Id, AnswerStr])
+	{AnswersList, QuestionComp} = 
+		lists:mapfoldl(
+			fun({Id, #answer{text = AnswerStr, complexity = Comp}}, Acc) ->
+				{
+					format("~p. - ~s \n(Complexity: ~p)", [Id, AnswerStr, Comp]),
+					Acc + Comp
+				}
 			end,
+			0,
 			DictAnswers
 		),
 	AnswersStr = 
@@ -732,11 +775,16 @@ ask_question(_, #question{text = QuestionStr, answers = Answers}, OptsDiagramSeq
 		[any2str(Opt) || Opt <- lists:seq(1, LastOpt - 1)],
 	OptionsStr = 
 		string:join(Options, "/"),
+	QuestionCompStr = 
+		format(
+			"\n\n<Question complexity: ~p> <Node selected: ~p>\n", 
+			[QuestionComp, Selected]),
 	Prompt = 
 		space()
 		++ QuestionStr 
 		++ "\n"
 		++ AnswersStr
+		++ QuestionCompStr
 		++ "\n[" 
 		++ OptionsStr
 		++ "/t/d/c/s/p/r/u/h/a]: ",
@@ -769,12 +817,17 @@ get_behavior("c", _, OptsDiagramSeq, _) ->
 			lists:seq(1,OptsDiagramSeq))
 	};
 get_behavior(NumberStr, DictAnswers, OptsDiagramSeq, FunAsk) ->
+	put(question_answered, get(question_answered) + 1),
 	try 
 		Number = element(1,string:to_integer(NumberStr)),
 		#answer{when_chosen = Behaviour} = element(2, lists:keyfind(Number, 1, DictAnswers)),
+		AccComplexity = 
+			[(element(2, lists:keyfind(N, 1, DictAnswers)))#answer.complexity
+			|| N <- lists:seq(1, Number)],
+		put(question_complexity, get(question_complexity) + lists:sum(AccComplexity)),
 		case Behaviour of 
 			#question{answers = [Answer = #answer{text = TextAns, when_chosen = BehAns}]} ->
-				io:format("Auto-selecting, only one option:\n" ++ TextAns),
+				io:format("Automatic selection (only one option):\n" ++ TextAns),
 				BehAns;
 			#question{} ->
 				FunAsk(-1, Behaviour, OptsDiagramSeq, FunAsk);
@@ -785,5 +838,55 @@ get_behavior(NumberStr, DictAnswers, OptsDiagramSeq, FunAsk) ->
 		_:_ ->
 			other
 	end.
+	
+marca() ->
+  "@@--@@\n".
 
+session_report() ->
+	case get(print_session_info) of 
+		true -> 
+			io:format(marca()),
+			io:format("{\n"),
+		  	io:format("\t\"Answered questions\" : ~p,\n", [get(question_answered)]),
+			io:format("\t\"Questions' complexity\" : ~p,\n", [get(question_complexity)]),
+			
+			io:format("\t\"Initial PID selection Complexity\" : ~p,\n", [get(initial_complexity)]),
+			
+			io:format("\t\"Evaluation tree time (microseconds)\" : ~p,\n", [get(eval_tree_time)]),
+			io:format("\t\"Evaluation tree memory (bytes)\" : ~p,\n", [get(eval_tree_memory)]),
+			io:format("\t\"Evaluation tree nodes\" : ~p,\n", [get(eval_tree_nodes)]),
+
+			io:format("\t\"Sequence diagram time (microseconds)\" : ~p,\n", [get(seq_diag_time)]),
+			io:format("\t\"Sequence diagram memory (bytes)\" : ~p,\n", [get(seq_diag_memory)]),
+			io:format("\t\"Sequence diagram events\" : ~p,\n", [get(seq_diag_events)]),
+			io:format("\t\"Sequence diagram events + Lasts\" : ~p\n", [get(seq_diag_events_lasts)]),
+			io:format("}\n"),
+			io:format(marca());
+		false -> 
+			ok 
+	end.
+
+%session_report() ->
+%	io:format(space()),
+%	io:format("SESSION DATA\n"),
+%	io:format("Answered questions:\t~p\n", [get(question_answered)]),
+%	io:format("Questions' complexity:\t~p\n", [get(question_complexity)]),
+%	io:format(space()),
+%	io:format(space()),
+%	io:format("INITIAL PID SELECTION COMPLEXITY\n"),
+%	io:format("Complexity:\t~p\n", [get(initial_complexity)]),
+%	io:format(space()),
+%	io:format(space()),
+%	io:format("EVALUATION TREE BUILDING DATA\n"),
+%	io:format("Time:\t~p microseconds\n", [get(eval_tree_time)]),
+%	io:format("Memory:\t~p bytes\n", [get(eval_tree_memory)]),
+%	io:format("Nodes:\t~p\n", [get(eval_tree_nodes)]),
+%	io:format(space()),
+%	io:format(space()),
+%	io:format("SEQUENCE DIAGRAM BUILDING DATA\n"),
+%	io:format("Time:\t\t~p microseconds\n", [get(seq_diag_time)]),
+%	io:format("Memory:\t\t~p bytes\n", [get(seq_diag_memory)]),
+%	io:format("Events:\t\t~p\n", [get(seq_diag_events)]),
+%	io:format("Events + Lasts:\t~p\n", [get(seq_diag_events_lasts)]),
+%	io:format(space()).
 

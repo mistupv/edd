@@ -29,7 +29,10 @@
 % TODO: Treat correctly errors to be considered as a value
 
 
-parse_transform(Forms, _) ->
+parse_transform(Forms, Opts) ->
+	% io:format("Opts: ~p\n", [Opts]),
+	put(modules_to_instrument, hd([InsMod0 || {inst_mod, InsMod0} <- Opts])),
+	% io:format("Trans: ~p\n", [hd(Forms)]),
 	put(free, 0),
 	ModFileName = 
 		lists:sort(
@@ -53,7 +56,12 @@ parse_transform(Forms, _) ->
 	% 		erl_pp:form(Form)
 	% 	 catch 
 	% 	 _:_ -> 
-	% 	 	""
+	% 	 	try
+	% 	 		erl_pp:function(Form)
+	% 	 	catch 
+	% 	 	_:_ ->
+	% 	 		"error" ++ lists:flatten(io_lib:format("~p", [Form]))
+	% 	 	end
 	% 	 end || Form <- erl_syntax:revert_forms(NForms)],
 	% [io:format("~s\n", [StrForm]) || StrForm <- StrRevertedNForms],
 	erl_syntax:revert_forms(NForms).
@@ -151,6 +159,7 @@ inst_expr(T) ->
 					get_ann_info(env, T),
 				Context = 
 					build_dict_var(VarsContext),
+				% io:format("PP: ~p\n", [erl_syntax:tuple(pos_and_pp(T))]),
 				SendReceive = 
 						build_send_trace(
 							receive_reached, 
@@ -182,6 +191,16 @@ inst_expr(T) ->
 							case erl_syntax:atom_value(AppOper)  of 
 								spawn ->
 									inst_spawn(T, erl_syntax:application_arguments(T));
+								spawn_link ->
+									inst_spawn(T, erl_syntax:application_arguments(T));
+								spawn_monitor ->
+									inst_spawn(T, erl_syntax:application_arguments(T));
+								spawn_opt ->
+									inst_spawn(T, erl_syntax:application_arguments(T));
+								apply ->
+									[ModName, _, _] = 
+										erl_syntax:application_arguments(T),
+									inst_call_loading(T, ModName);
 								_ ->
 									T
 									% case lists:member(Other, ?BIFS) of 
@@ -195,68 +214,47 @@ inst_expr(T) ->
 						% 	inst_spawn(T, erl_syntax:application_arguments(T));
 						% _ -> 
 						% 	case erl_syntax:type(AppOper) of 
-								module_qualifier -> 
-									ModName = 
-										erl_syntax:module_qualifier_argument(AppOper),
-									FunName = 
-										erl_syntax:module_qualifier_body(AppOper),
-									case {ModName, FunName} of 
-										{erlang, send} ->
-											inst_send(T, erl_syntax:application_arguments(T));
-										{erlang, spawn} ->
-											inst_spawn(T, erl_syntax:application_arguments(T));
-										_ ->
-											ModNameStr = erl_syntax:atom_literal(ModName),
-											% {[VarCall], [StoreCall]} = 
-											% 	args_assign("EDDCallResult", [T]),
-											% io:format("~p\n", [{ModNameStr, FunName}]),
-											erl_syntax:case_expr(
-												erl_syntax:application(
-													erl_syntax:atom(code) , 
-													erl_syntax:atom(where_is_file), 
-													[erl_syntax:string(ModNameStr ++ ".erl")]),
-												[
-													%TODO: try to load also from src directory
-													erl_syntax:clause(
-														[erl_syntax:cons(
-															erl_syntax:char($.), 
-															erl_syntax:underscore())] ,
-														[],
-														[	
-															% erl_syntax:application(
-															% 	erl_syntax:atom(io) , 
-															% 	erl_syntax:atom(format), 
-															% 	[erl_syntax:string("entra desde " ++ erl_syntax:atom_literal(get(module_name)) ++ " : " ++ ModNameStr ++ " " ++ erl_syntax:atom_literal(FunName) ++ "\n")]),
-															% erl_syntax:application(
-															% 	erl_syntax:atom(edd_trace_new) , 
-															% 	erl_syntax:atom(compile_and_reload), 
-															% 	[ModName]),
-															build_send_load(ModName),
-															build_receive_load(),
-															T
-															% StoreCall,
-															% erl_syntax:application(
-															% 	erl_syntax:atom(edd_trace_new) , 
-															% 	erl_syntax:atom(undo_compile_and_reload), 
-															% 	[ModName]),
-															% VarCall
-														]),
-													erl_syntax:clause(
-														[erl_syntax:underscore()],
-														[],
-														[	
-														% erl_syntax:application(
-														% 	erl_syntax:atom(io) , 
-														% 	erl_syntax:atom(format), 
-														% 	[erl_syntax:string("NO entra " ++ ModNameStr ++ " " ++ erl_syntax:atom_literal(FunName) ++ "\n")]),
-														T])
-												])
-										% _ -> 
-										% 	T
-									end;
-								% _ ->
-								% 	T
-							% end;
+						module_qualifier -> 
+							ModName = 
+								erl_syntax:module_qualifier_argument(AppOper),
+							FunName = 
+								erl_syntax:module_qualifier_body(AppOper),
+							% try 
+							% 	io:format("~p\n", [{erl_syntax:atom_value(ModName), erl_syntax:atom_value(FunName)}])
+							% catch
+							% 	_:_ ->
+							% 		ok
+							% end,
+							try 
+								case {erl_syntax:atom_value(ModName), erl_syntax:atom_value(FunName)} of 
+									{erlang, send} ->
+										inst_send(T, erl_syntax:application_arguments(T));
+									{erlang, spawn} ->
+										inst_spawn(T, erl_syntax:application_arguments(T));
+									{erlang, spawn_link} ->
+										inst_spawn(T, erl_syntax:application_arguments(T));
+									{erlang, spawn_monitor} ->
+										inst_spawn(T, erl_syntax:application_arguments(T));
+									{erlang, spawn_opt} ->
+										inst_spawn(T, erl_syntax:application_arguments(T));
+									% {var,_,_} ->
+									% 	T;
+									_ ->
+										% ModNameStr = erl_syntax:atom_literal(ModName),
+										% {[VarCall], [StoreCall]} = 
+										% 	args_assign("EDDCallResult", [T]),
+										% io:format("~p\n", [{ModNameStr, FunName}]),
+										inst_call_loading(T, ModName)
+									% _ -> 
+									% 	T
+								end
+							catch
+								_:_ ->
+									inst_call_loading(T, ModName)
+							end;
+						% _ ->
+						% 	T
+					% end;
 						variable -> 
 							T;
 						fun_expr -> 
@@ -281,6 +279,81 @@ inst_expr(T) ->
 		end,
 	Res = erl_syntax:set_ann(NT, erl_syntax:get_ann(T)),
 	Res. 
+
+inst_call_loading(T, ModName) ->
+	erl_syntax:case_expr(
+		erl_syntax:application(
+			erl_syntax:atom(code), 
+			erl_syntax:atom(where_is_file), 
+			[erl_syntax:infix_expr(
+				erl_syntax:application(
+					erl_syntax:atom(erlang),
+					erl_syntax:atom(atom_to_list),
+					[ModName]), 
+				erl_syntax:operator("++"), 
+				erl_syntax:string(".erl"))]),
+			% [erl_syntax:string(ModNameStr ++ ".erl")]),
+		[
+			%TODO: try to load also from src directory
+			erl_syntax:clause(
+				[erl_syntax:cons(
+					erl_syntax:char($.), 
+					erl_syntax:underscore())] ,
+				[],
+				[	
+					% erl_syntax:application(
+					% 	erl_syntax:atom(io) , 
+					% 	erl_syntax:atom(format), 
+					% 	[erl_syntax:string("entra desde " ++ erl_syntax:atom_literal(get(module_name)) ++ " : " ++ ModNameStr ++ " " ++ erl_syntax:atom_literal(FunName) ++ "\n")]),
+					% erl_syntax:application(
+					% 	erl_syntax:atom(edd_trace_new) , 
+					% 	erl_syntax:atom(compile_and_reload), 
+					% 	[ModName]),
+					build_send_load(ModName),
+					build_receive_load(),
+					T
+					% StoreCall,
+					% erl_syntax:application(
+					% 	erl_syntax:atom(edd_trace_new) , 
+					% 	erl_syntax:atom(undo_compile_and_reload), 
+					% 	[ModName]),
+					% VarCall
+				]),
+			erl_syntax:clause(
+				[erl_syntax:underscore()],
+				[],
+				[	
+					erl_syntax:case_expr(
+						erl_syntax:application(
+							erl_syntax:atom(lists), 
+							erl_syntax:atom(member), 
+							[ModName,
+							 lists_with_modules_to_instument()]),
+						[
+							erl_syntax:clause(
+								[erl_syntax:atom(true)] ,
+								[],
+								[	
+									% erl_syntax:application(
+									% 	erl_syntax:atom(io) , 
+									% 	erl_syntax:atom(format), 
+									% 	[erl_syntax:application(
+									% 			erl_syntax:atom(erlang),
+									% 			erl_syntax:atom(atom_to_list),
+									% 			[ModName])]),
+									build_send_load(ModName),
+									build_receive_load(),
+									T
+								]),
+							erl_syntax:clause(
+								[erl_syntax:atom(false)] ,
+								[],
+								[	
+									T
+								])
+						])
+				])
+		]).
 
 inst_fun_clauses(Clauses, FunId) ->
 	% T = erl_syntax_lib:mapfold(fun annotate_vars/2,T0),
@@ -381,10 +454,13 @@ inst_send(T, SendArgs) ->
 			VarArgs ++ pos_and_pp(T)), 	
 
 	NT = 
-		erl_syntax:infix_expr(
-			lists:nth(1, VarArgs), 
-			erl_syntax:operator('!'), 
-			lists:nth(2, VarArgs)),
+		build_send_par(
+			hd(VarArgs),
+			tl(VarArgs)),
+		% erl_syntax:infix_expr(
+		% 	lists:nth(1, VarArgs), 
+		% 	erl_syntax:operator('!'), 
+		% 	lists:nth(2, VarArgs)),
 
 	BlockSend = 
 		erl_syntax:block_expr(StoreArgs ++ [NT, SendSend, lists:nth(2, VarArgs)]),
@@ -394,6 +470,7 @@ inst_send(T, SendArgs) ->
 inst_spawn(T, SpawnArgs) ->
 	% TODO: Be careful with this approach. Could not work for spwan with only one arg, i.e. spawn(fun() -> ... )
 	% Maybe solved correcting SpwancCall or removing previous variables bindings for that case
+	% io:format("INSTRUMENT spawn ~p\n", [erl_syntax:application_operator(T)]),
 	VarReceiveResult = 
 		free_named_var("EDDSpawnResult"),
 	{VarArgs, StoreArgs} = 
@@ -528,12 +605,19 @@ build_dict_var(Vars) ->
 			[erl_syntax:string(V) || V <- Vars],
 			[erl_syntax:variable(V)  || V <- Vars] )).
 
-build_send(Msg) ->
+build_send_par(Dest, Pars) ->
 	erl_syntax:application(
 		erl_syntax:atom(erlang) , 
 		erl_syntax:atom(send), 
-		[erl_syntax:atom(edd_tracer),
-		 erl_syntax:tuple(Msg)]).
+		[Dest| Pars]).
+
+build_send(Msg) ->
+	build_send_par(
+		erl_syntax:tuple([
+			erl_syntax:atom(edd_tracer),
+			erl_syntax:atom(node())
+		]),
+		[erl_syntax:tuple(Msg)]).
 
 build_send_trace(Tag, Args) -> 
 	build_send(
@@ -662,6 +746,13 @@ get_ann_info(Tag, T) ->
 		[H|_] ->
 			H 
 	end.
+
+lists_with_modules_to_instument() ->	
+	erl_syntax:list(
+		[erl_syntax:atom(M) 
+		|| 
+		M <- get(modules_to_instrument), is_atom(M)]).
+
 	% hd(
 	% 	[Info 
 	% 	|| {Tag_, Info} <- erl_syntax:get_ann(T), 
